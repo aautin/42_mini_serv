@@ -1,7 +1,5 @@
 # 42_mini_serv
 
-# Mini Server (mini_serv.c)
-
 ## Overview
 This project is a simple **TCP server** written in C. It listens for incoming connections, accepts multiple clients, and broadcasts messages to all connected clients. It uses **`select()`** for handling multiple clients in a non-blocking manner.
 
