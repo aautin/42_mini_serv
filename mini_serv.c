@@ -9,25 +9,19 @@
 #include <sys/select.h> // select
 
 //Types
-typedef enum announce_e {
-	ARRIVED, LEFT
-}	announce_t;
+typedef struct client_s {
+	struct client_s*	next;
 
-typedef struct client_lst_s {
-	struct client_lst_s*	next;
-
-	char*					buffer;
-	int						fd;
-	int						index;
-}	client_lst;
+	char*				buffer;
+	int					fd;
+	int					index;
+}	client;
 
 typedef struct server_s {
 	int			fd;
+	client*		clients;
 	int			next_index;
-
-	int			clients_nb;
-	client_lst*	clients;
-}	server_t;
+}	server;
 //--
 
 
@@ -90,21 +84,21 @@ int extract_message(char** buf, char** msg)
 	return (0); // msg not finished, nothing to do
 }
 
-void	build_fd_sets(server_t* server, fd_set* read, fd_set* write)
+void	build_fd_sets(server* server, fd_set* read, fd_set* write)
 {
 	FD_ZERO(read);
 	FD_ZERO(write);
 
 	FD_SET(server->fd, read);
 
-	client_lst* clients;
+	client* clients;
 	for (clients = server->clients; clients != NULL; clients = clients->next) {
 		FD_SET(clients->fd, read);
 		FD_SET(clients->fd, write);
 	}
 }
 
-void	push_client(client_lst** clients, client_lst* new, int index)
+void	push_client(client** clients, client* new, int index)
 {
 	new->buffer = NULL;
 	new->next = NULL;
@@ -115,25 +109,27 @@ void	push_client(client_lst** clients, client_lst* new, int index)
 		return;
 	}
 
-	client_lst* last = *clients;
+	client* last = *clients;
 	while (last->next != NULL)
 		last = last->next;
 
 	last->next = new;
 }
 
-void	pop_client(client_lst** clients, int client_fd)
+void	pop_client(client** clients, int client_fd)
 {
 	if (*clients == NULL)
 		return;
-	if ((*clients)->next == NULL && (*clients)->fd == client_fd) {
+	if ((*clients)->fd == client_fd) {
+		client* next = (*clients)->next;
+		free((*clients)->buffer);
 		free(*clients);
-		*clients = NULL;
+		*clients = next;
 		return;
 	}
 
-	client_lst* pre_pop = *clients;
-	client_lst* pop = pre_pop->next;
+	client* pre_pop = *clients;
+	client* pop = pre_pop->next;
 	while (pop != NULL) {
 		if (pop->fd == client_fd) {
 			pre_pop->next = pop->next;
@@ -145,19 +141,14 @@ void	pop_client(client_lst** clients, int client_fd)
 	}
 }
 
-void	announce(client_lst* clients, fd_set* write_set, int index, announce_t it)
+void	announce(client* clients, fd_set* write_set, int index, char* announce)
 {
 	char buffer[128];
 	*buffer = 0;
 
-	sprintf(buffer, "server: client %d just ", index);
-	size_t buffer_len = strlen(buffer);
-	if (it == ARRIVED)
-		sprintf(buffer + buffer_len, "arrived\n");
-	if (it == LEFT)
-		sprintf(buffer + buffer_len, "left\n");
+	sprintf(buffer, "server: client %d just %s\n", index, announce);
 
-	buffer_len = strlen(buffer);
+	size_t buffer_len = strlen(buffer);
 	while (clients != NULL) {
 		if (FD_ISSET(clients->fd, write_set))
 			write(clients->fd, buffer, buffer_len);
@@ -165,59 +156,59 @@ void	announce(client_lst* clients, fd_set* write_set, int index, announce_t it)
 	}
 }
 
-void	broadcast_message(server_t* server, client_lst* client, char* message, fd_set* write_set)
+void	broadcast_message(server* server, int client_index, char* message, fd_set* write_set)
 {
-	char *buffer = malloc((strlen("client %d: ") + strlen(message) + 1) * sizeof(char));
-	if (buffer == NULL)
-		exit_err("Fatal error\n");
+	char buffer[65000];
+	*buffer = 0;
 
-	sprintf(buffer, "client %d: %s", client->index, message);
+	sprintf(buffer, "client %d: %s", client_index, message);
 	size_t buffer_len = strlen(buffer);
 
-	client_lst* client_ptr = server->clients;
-	while (client_ptr != NULL) {
-		if (client_ptr != client && FD_ISSET(client_ptr->fd, write_set))
-			write(client_ptr->fd, buffer, buffer_len);
-		client_ptr = client_ptr->next;
+	client* clients = server->clients;
+	while (clients != NULL) {
+		if (clients->index != client_index && FD_ISSET(clients->fd, write_set))
+			write(clients->fd, buffer, buffer_len);
+		clients = clients->next;
 	}
 }
 
-void	read_client(server_t* server, client_lst* client, fd_set* read_set, fd_set* write_set)
+void	read_client(server* server, client* client, fd_set* read_set, fd_set* write_set)
 {
-	char *buffer = malloc((2048 + 1) * sizeof(char));
+	char buffer[2049];
 
-	int read_returnval = read(client->fd, buffer, 2048);
+	int read_returnval = recv(client->fd, buffer, 2048, 0);
 	if (read_returnval < 0)
 		exit_err("Fatal error\n");
 	buffer[read_returnval] = '\0';
 
 	if (read_returnval == 0) { // left message
-		announce(server->clients, write_set, client->index, LEFT);
+		announce(server->clients, write_set, client->index, "left");
 		pop_client(&(server->clients), client->fd);
-		server->clients_nb--;
 		return;
 	}
 
+	client->buffer = str_join(client->buffer, buffer);
+	
 	// message
 	char* message;
-	int extract_returnval = extract_message(&buffer, &message);
+	char* newbuffer = client->buffer;
+	int extract_returnval = extract_message(&newbuffer, &message);
+	while (extract_returnval == 1) {
+		broadcast_message(server, client->index, message, write_set);
+		free(client->buffer);
+		client->buffer = newbuffer;
+
+		newbuffer = client->buffer;
+		extract_returnval = extract_message(&newbuffer, &message);
+	}
 	if (extract_returnval == -1)
 		exit_err("Fatal error\n");
-	else if (extract_returnval == 0) {
-		client->buffer = str_join(client->buffer, buffer);
-		free(buffer);
-	}
-	else if (extract_returnval == 1) {
-		broadcast_message(server, client, str_join(buffer, message), write_set);
-		free(message);
-		client->buffer = buffer;
-	}
 }
 
-void	read_fds(server_t* server, fd_set* read_set, fd_set* write_set)
+void	read_fds(server* server, fd_set* read_set, fd_set* write_set)
 {
 	if (FD_ISSET(server->fd, read_set)) { // new client
-		client_lst* new_client = malloc(sizeof(*new_client));
+		client* new_client = malloc(sizeof(*new_client));
 		if (new_client == NULL)
 			exit_err("Fatal error\n");
 
@@ -228,15 +219,14 @@ void	read_fds(server_t* server, fd_set* read_set, fd_set* write_set)
 		new_client->fd = client_fd;
 		push_client(&(server->clients), new_client, server->next_index);
 		server->next_index++;
-		server->clients_nb++;
 
-		announce(server->clients, write_set, new_client->index, ARRIVED);
+		announce(server->clients, write_set, new_client->index, "arrived");
 	}
 
-	client_lst* clients = server->clients;
+	client* clients = server->clients;
 	while (clients != NULL) {
 		if (FD_ISSET(clients->fd, read_set)) { // new message
-			client_lst* next = clients->next;
+			client* next = clients->next;
 			read_client(server, clients, read_set, write_set);
 			clients = next;
 		}
@@ -245,7 +235,7 @@ void	read_fds(server_t* server, fd_set* read_set, fd_set* write_set)
 	}
 }
 
-void	mini_serv(server_t* server)
+void	mini_serv(server* server)
 {
 	while (1) {
 		fd_set read, write;
@@ -281,7 +271,7 @@ int	main(int argc, char** argv)
 	if (listen(socket_fd, 10) == -1)
 		exit_err("Fatal error\n");
 	
-	server_t	server = {socket_fd, 0, 0, NULL};
+	server	server = {socket_fd, NULL, 0};
 	mini_serv(&server);
 
 	return EXIT_SUCCESS;
