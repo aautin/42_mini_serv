@@ -122,6 +122,7 @@ void	pop_client(client** clients, int client_fd)
 		return;
 	if ((*clients)->fd == client_fd) {
 		client* next = (*clients)->next;
+		close((*clients)->fd);
 		free((*clients)->buffer);
 		free(*clients);
 		*clients = next;
@@ -133,6 +134,8 @@ void	pop_client(client** clients, int client_fd)
 	while (pop != NULL) {
 		if (pop->fd == client_fd) {
 			pre_pop->next = pop->next;
+			close(pop->fd);
+			free(pop->buffer);
 			free(pop);
 			return;
 		}
@@ -270,7 +273,7 @@ int	main(int argc, char** argv)
 
 	if (listen(socket_fd, 10) == -1)
 		exit_err("Fatal error\n");
-	
+
 	server	server = {socket_fd, NULL, 0};
 	mini_serv(&server);
 
